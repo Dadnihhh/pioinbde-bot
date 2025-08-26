@@ -1,126 +1,240 @@
-import os
+from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
 from datetime import datetime
-from collections import defaultdict
-from threading import Thread
-from zoneinfo import ZoneInfo
-
+import pytz
 from flask import Flask
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from threading import Thread
+import os
 
-# ====== Configurações ======
-TIMEZONE = ZoneInfo("America/Bahia")       # Horário de Salvador/BA
-HORA_INICIO = 7                            # início (7:00)
-HORA_FIM = 11                              # fim    (11:00)
-HORARIO_ATIVO = True                       # True = respeita janela / False = aceita sempre
-MAX_PER_DAY = 10                           # máximo de perguntas no dia
-ONE_PER_USER = True                        # True = 1 pergunta por usuário/dia
+# Token do Telegram e ID do grupo
+TOKEN = "7492540959:AAFatZvdk1gN2y5UD-AkQUJt_b6P5yqE-_4"
+CHAT_ID_GRUPO = -1001234567890  # Substitua pelo seu ID de grupo real
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")   # defina no Render (NÃO hardcode!)
-if not TOKEN:
-    raise RuntimeError("Defina a env var TELEGRAM_TOKEN no Render.")
+# Lista de perguntas do dia
+perguntas = []
 
-# Admin opcional: restrição do /listar (IDs numéricos separados por vírgula)
-ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+# Controle de usuários que já mandaram pergunta hoje
+usuarios_hoje = {}
 
-# ====== Armazenamento em memória (por dia) ======
-perguntas_by_day = defaultdict(list)       # {date: [ {user_id,nome,texto,hora} , ... ]}
-user_asked_by_day = defaultdict(set)       # {date: {user_id, ...}}
+# Horário permitido (Brasília)
+HORA_INICIO = 7
+HORA_FIM = 22
+HORARIO_ATIVO = False
+TZ_BR = pytz.timezone("America/Sao_Paulo")
 
-def hoje():
-    return datetime.now(TIMEZONE).date()
+# Lista de admins autorizados
+ADMINS_AUTORIZADOS = ["antoniomcpio"]  # sem @
 
-def dentro_da_janela(agora: datetime) -> bool:
-    dia_semana = agora.weekday()  # 0=seg, 6=dom
-    return (0 <= dia_semana <= 4) and (HORA_INICIO <= agora.hour < HORA_FIM)
+# Mensagens
+MENSAGEM_AVISO = f"⏰ Perguntas só podem ser enviadas de segunda a sexta, das {HORA_INICIO}:00 às {HORA_FIM}:00 (horário de Brasília)"
+MENSAGEM_BOAS_VINDAS = """👋 Olá! Eu sou o Bot Admin da **Comunidade Pio INBDE**.
 
-MENSAGEM_AVISO = (
-    f"⏰ *Horário de funcionamento:*\n"
-    f"• Segunda a sexta, das *{HORA_INICIO}:00* às *{HORA_FIM}:00* (horário de Salvador/BA).\n"
-    f"• *Máximo de {MAX_PER_DAY}* perguntas por dia no grupo.\n"
-    f"• *1 pergunta por pessoa* por dia."
-)
+🎯 **Como funciona:**
+• Use o comando `/pergunta` seguido da sua dúvida
+• Sua pergunta será enviada para o Prof. Antonio Pio no grupo da comunidade
+• Horário: Segunda a sexta, das 7h às 22h (Brasília)
+• Limite: 1 pergunta por pessoa por dia
 
-# ====== Handlers ======
-async def comando_pergunta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type not in ("group", "supergroup"):
-        await update.message.reply_text("Use /pergunta dentro do *grupo*.", parse_mode="Markdown")
+📚 **Exemplo:**
+`/pergunta Como calcular a resistência de um material?`
+
+✅ Sua pergunta chegará ao professor e será respondida no grupo oficial!"""
+
+# ============================
+# Funções auxiliares
+# ============================
+def is_admin(user):
+    username = user.username
+    return username and username.lower() in [admin.lower() for admin in ADMINS_AUTORIZADOS]
+
+def reset_dia():
+    global usuarios_hoje, perguntas
+    agora = datetime.now(TZ_BR)
+    if usuarios_hoje.get("data") != agora.date():
+        usuarios_hoje = {"data": agora.date()}
+        perguntas.clear()
+
+# ============================
+# Comando /pergunta
+# ============================
+async def nova_pergunta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_dia()
+    if update.message.chat.type not in ["group", "supergroup"]:
         return
 
-    texto = " ".join(context.args).strip()
+    texto = " ".join(context.args)
     if not texto:
-        await update.message.reply_text("❌ Escreva sua pergunta depois de /pergunta.")
+        await update.message.reply_text("❌ Por favor, escreva sua pergunta depois do comando /pergunta")
         return
 
-    agora = datetime.now(TIMEZONE)
-    dia = hoje()
+    agora = datetime.now(TZ_BR)
     user_id = update.message.from_user.id
-    nome = update.message.from_user.first_name or "Aluno(a)"
+    nome = update.message.from_user.first_name
 
-    # Limites globais do dia
-    if len(perguntas_by_day[dia]) >= MAX_PER_DAY:
-        await update.message.reply_text("🚫 Limite diário de perguntas já foi atingido. Tente amanhã!")
+    if len(perguntas) >= 10:
+        await update.message.reply_text("⚠️ O limite de 10 perguntas de hoje já foi atingido.")
         return
 
-    # 1 por usuário/dia
-    if ONE_PER_USER and user_id in user_asked_by_day[dia]:
-        await update.message.reply_text("⚠️ Você já enviou 1 pergunta hoje. Aguarde até amanhã.")
+    if user_id in usuarios_hoje:
+        await update.message.reply_text("⚠️ Você já enviou uma pergunta hoje. Tente novamente amanhã.")
         return
 
-    # Janela de horário/dias
-    if HORARIO_ATIVO and not dentro_da_janela(agora):
-        await update.message.reply_text(MENSAGEM_AVISO, parse_mode="Markdown")
-        return
+    hora_atual = agora.hour
+    dia_semana = agora.weekday()
 
-    # Registrar
-    perguntas_by_day[dia].append({
-        "user_id": user_id,
-        "nome": nome,
-        "texto": texto,
-        "hora": agora.strftime("%H:%M"),
-    })
-    user_asked_by_day[dia].add(user_id)
-    await update.message.reply_text("✅ Pergunta registrada com sucesso!")
+    if HORARIO_ATIVO:
+        if not (0 <= dia_semana <= 4 and HORA_INICIO <= hora_atual < HORA_FIM):
+            await update.message.reply_text(MENSAGEM_AVISO)
+            return
 
-async def comando_listar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Só no privado e opcionalmente restrito a admins
+    perguntas.append((nome, texto, agora.strftime("%H:%M")))
+    usuarios_hoje[user_id] = True
+    await update.message.reply_text("✅ Pergunta registrada com sucesso!\n\n📩 Sua pergunta foi enviada para o Prof. Antonio Pio na Comunidade Pio INBDE.")
+
+# ============================
+# Comando /start
+# ============================
+async def start_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type != "private":
-        await update.message.reply_text("Envie /listar no *privado*.", parse_mode="Markdown")
-        return
-    if ADMIN_IDS and update.message.from_user.id not in ADMIN_IDS:
-        await update.message.reply_text("🚫 Você não tem permissão para listar.")
         return
 
-    dia = hoje()
-    itens = perguntas_by_day.get(dia, [])
-    if not itens:
-        await update.message.reply_text("Nenhuma pergunta registrada hoje.")
+    user = update.message.from_user
+    if is_admin(user):
+        await update.message.reply_text(f"👨‍🏫 Olá Professor {user.first_name}! Você tem acesso administrativo.\n\nUse `/listar` para ver as perguntas recebidas.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(MENSAGEM_BOAS_VINDAS, parse_mode="Markdown")
+
+# ============================
+# Comando /listar (admins)
+# ============================
+async def listar_perguntas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.chat.type != "private":
+        return
+    user = update.message.from_user
+    if not is_admin(user):
+        await update.message.reply_text(MENSAGEM_BOAS_VINDAS, parse_mode="Markdown")
         return
 
-    msg = ["📋 *Perguntas recebidas hoje:*\n"]
-    for i, p in enumerate(itens, 1):
-        msg.append(f"{i}. 👤 *{p['nome']}* ({p['hora']})\n   💬 {p['texto']}\n")
-    await update.message.reply_text("\n".join(msg), parse_mode="Markdown")
+    reset_dia()
 
-async def comando_horario(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    estado = "ligado ✅" if HORARIO_ATIVO else "desligado ⚪"
-    await update.message.reply_text(f"{MENSAGEM_AVISO}\n\nEstado da janela: *{estado}*", parse_mode="Markdown")
+    if perguntas:
+        mensagem = "📋 *Perguntas recebidas hoje:*\n\n"
+        for i, (nome, pergunta, hora) in enumerate(perguntas, 1):
+            mensagem += f"{i}. 👤 *{nome}* ({hora})\n   💬 {pergunta}\n\n"
+        mensagem += f"\n📊 Total: {len(perguntas)}/10 perguntas\n👥 Usuários: {len([k for k in usuarios_hoje.keys() if k != 'data'])}"
+        await update.message.reply_text(mensagem, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("📋 Nenhuma pergunta registrada hoje.\n📊 Status: 0/10 perguntas")
 
-# ====== Bot + Flask juntos ======
-flask_app = Flask(__name__)
+# ============================
+# Comando /responder (apenas admins)
+# ============================
+SELECIONAR, RESPOSTA = range(2)
+resposta_atual = {}
 
-@flask_app.get("/health")
-def health():
-    return "ok", 200
+async def responder_inicio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    if not is_admin(user):
+        await update.message.reply_text("❌ Apenas admins podem usar este comando.")
+        return ConversationHandler.END
 
-def run_bot():
+    reset_dia()
+    if not perguntas:
+        await update.message.reply_text("⚠️ Não há perguntas para responder hoje.")
+        return ConversationHandler.END
+
+    mensagem = "📝 Selecione o número da pergunta que deseja responder:\n\n"
+    for i, (nome, pergunta, hora) in enumerate(perguntas, 1):
+        mensagem += f"{i}. 👤 {nome} ({hora}) - {pergunta}\n"
+    await update.message.reply_text(mensagem)
+    return SELECIONAR
+
+async def selecionar_pergunta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        indice = int(update.message.text) - 1
+        if not (0 <= indice < len(perguntas)):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Número inválido. Tente novamente.")
+        return SELECIONAR
+
+    context.user_data["responder_indice"] = indice
+    context.user_data["resposta_msgs"] = []
+    await update.message.reply_text("✅ Pergunta selecionada. Agora envie a resposta (texto, imagens ou vídeos). Quando terminar, use /fimresponder")
+    return RESPOSTA
+
+async def registrar_resposta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["resposta_msgs"].append(update.message)
+    return RESPOSTA
+
+async def fim_responder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    if not is_admin(user):
+        return ConversationHandler.END
+
+    indice = context.user_data.get("responder_indice")
+    if indice is None:
+        await update.message.reply_text("❌ Nenhuma pergunta selecionada.")
+        return ConversationHandler.END
+
+    pergunta_info = perguntas[indice]
+    mensagem_final = f"📌 *Pergunta:* {pergunta_info[1]}\n👤 Pergunta por: {pergunta_info[0]} ({pergunta_info[2]})\n\n*Resposta:*"
+
+    mensagens = context.user_data.get("resposta_msgs", [])
+    texto_resposta = ""
+    media = []
+    for msg in mensagens:
+        if msg.text:
+            texto_resposta += f"{msg.text}\n"
+        if msg.photo:
+            media.append(InputMediaPhoto(msg.photo[-1].file_id))
+        if msg.video:
+            media.append(InputMediaVideo(msg.video.file_id))
+
+    app = context.application
+    if media:
+        await app.bot.send_message(chat_id=CHAT_ID_GRUPO, text=mensagem_final + "\n" + texto_resposta)
+        await app.bot.send_media_group(chat_id=CHAT_ID_GRUPO, media=media)
+    else:
+        await app.bot.send_message(chat_id=CHAT_ID_GRUPO, text=mensagem_final + "\n" + texto_resposta)
+
+    await update.message.reply_text("✅ Resposta enviada com sucesso!")
+    return ConversationHandler.END
+
+# ============================
+# Flask para uptime
+# ============================
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "🤖 Bot Telegram está rodando!"
+
+def run_flask():
+    app_flask.run(host="0.0.0.0", port=5000)
+
+# ============================
+# Função principal
+# ============================
+def main():
+    Thread(target=run_flask, daemon=True).start()
+
     app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("pergunta", comando_pergunta))
-    app.add_handler(CommandHandler("listar", comando_listar))
-    app.add_handler(CommandHandler("horario", comando_horario))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.add_handler(CommandHandler("start", start_comando))
+    app.add_handler(CommandHandler("pergunta", nova_pergunta))
+    app.add_handler(CommandHandler("listar", listar_perguntas))
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("responder", responder_inicio)],
+        states={
+            SELECIONAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, selecionar_pergunta)],
+            RESPOSTA: [MessageHandler(filters.ALL & ~filters.COMMAND, registrar_resposta)],
+        },
+        fallbacks=[CommandHandler("fimresponder", fim_responder)],
+    )
+    app.add_handler(conv_handler)
+
+    app.run_polling()
 
 if __name__ == "__main__":
-    # Inicia o bot em uma thread e o Flask como Web Service (Render exige porta aberta)
-    Thread(target=run_bot, daemon=True).start()
-    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
+    main()
