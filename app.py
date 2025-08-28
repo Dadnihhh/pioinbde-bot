@@ -50,6 +50,13 @@ MENSAGEM_BOAS_VINDAS = """👋 Olá! Eu sou o Bot Admin da **Comunidade Pio INBD
 """
 
 # ============================
+# Função para verificar admin
+# ============================
+def is_admin(user):
+    username = user.username
+    return username and username.lower() in [adm.lower() for adm in ADMINS_AUTORIZADOS]
+
+# ============================
 # Comando /pergunta
 # ============================
 async def nova_pergunta(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,20 +100,15 @@ async def nova_pergunta(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Pergunta registrada com sucesso! (horário ignorado)")
 
 # ============================
-# Função para verificar admin
-# ============================
-def is_admin(user):
-    username = user.username
-    return username and username.lower() in [adm.lower() for adm in ADMINS_AUTORIZADOS]
-
-# ============================
 # Comando /start
 # ============================
 async def start_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type == "private":
         user = update.message.from_user
         if is_admin(user):
-            await update.message.reply_text(f"👨‍🏫 Olá Professor {user.first_name}! Você tem acesso administrativo.\n\nUse `/listar` para ver as perguntas recebidas.", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"👨‍🏫 Olá Professor {user.first_name}! Você tem acesso administrativo.\n\nUse `/listar` para ver as perguntas recebidas.",
+                parse_mode="Markdown")
         else:
             await update.message.reply_text(MENSAGEM_BOAS_VINDAS, parse_mode="Markdown")
 
@@ -168,7 +170,7 @@ def main():
     app.add_handler(CommandHandler("start", start_comando))
     app.add_handler(CommandHandler("pergunta", nova_pergunta))
     app.add_handler(CommandHandler("listar", listar_perguntas))
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, mensagem_privada))
+    app.add_handler(MessageHandler(filters.PRIVATE & ~filters.COMMAND, mensagem_privada))
     app.run_polling()
 
 if __name__ == "__main__":
