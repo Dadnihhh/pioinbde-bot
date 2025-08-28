@@ -1,12 +1,4 @@
-<<<<<<< HEAD
 python-telegram-bot==20.7
 Flask==3.0.3
-pytz
-python-dotenv
-=======
-python-telegram-bot==20.7
-Flask==3.0.3
-pytz
-python-dotenv
-
->>>>>>> 2c5936f684e6cc59f34b08edbc5707a28e0a1d7a
+python-dotenv==1.0.0
+pytz==2025.8
