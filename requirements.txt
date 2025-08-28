@@ -1,4 +1,5 @@
 python-telegram-bot==20.7
 Flask==3.0.3
 python-dotenv==1.0.0
-pytz==2025.8
+pytz==2025.2
+
